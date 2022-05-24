@@ -102,3 +102,6 @@ ENV/
 
 # mypy
 .mypy_cache/
+/.data/
+/output/
+/m30k_deen_shr.pkl
