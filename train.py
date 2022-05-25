@@ -16,8 +16,8 @@ import torch
 import torch.nn.functional as F
 # noinspection PyPackageRequirements
 import torch.optim as optim
-from torchtext.legacy.data import Dataset, BucketIterator
-from torchtext.legacy.datasets import TranslationDataset
+from torchtext.data import Dataset, BucketIterator
+from torchtext.datasets import TranslationDataset
 from tqdm import tqdm
 
 import transformer.Constants as Constants
