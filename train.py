@@ -7,6 +7,7 @@ import math
 import os
 import random
 import time
+from collections import OrderedDict
 
 import dill as pickle
 import numpy as np
@@ -141,12 +142,12 @@ def train(model, training_data, validation_data, optimizer, device, opt):
         print("[Info] Use Tensorboard")
         # noinspection PyPackageRequirements
         from torch.utils.tensorboard import SummaryWriter
-        tb_writer = SummaryWriter(log_dir=os.path.join(opt.output_dir, 'tensorboard'))
+        tb_writer = SummaryWriter(log_dir=os.path.join(get_output_dir(opt), 'tensorboard'))
     else:
         tb_writer = None
 
-    log_train_file = os.path.join(opt.output_dir, 'train.log')
-    log_valid_file = os.path.join(opt.output_dir, 'valid.log')
+    log_train_file = os.path.join(get_output_dir(opt), 'train.log')
+    log_valid_file = os.path.join(get_output_dir(opt), 'valid.log')
 
     print(f'[Info] Training performance will be written to file: {log_train_file} and {log_valid_file}')
 
@@ -159,6 +160,16 @@ def train(model, training_data, validation_data, optimizer, device, opt):
               f'elapse: {(time.time() - start_time) / 60:3.3f} min')
 
     valid_losses = []
+
+    os.makedirs('initial', exist_ok=True)
+    init_path = 'initial/model.pt'
+    if not os.path.exists(init_path):
+        print(f'[Info] Saving initial model to {init_path}')
+        torch.save(model.state_dict(), init_path)
+    elif opt.x is None or opt.y is None:
+        print(f'[Info] Loading initial model at {init_path}')
+        model.load_state_dict(torch.load(init_path))
+
     global epoch, model_dict
     start = epoch if epoch is not None else 0
     if model_dict is not None:
@@ -190,8 +201,12 @@ def train(model, training_data, validation_data, optimizer, device, opt):
         elif opt.save_mode == 'best':
             model_name = 'model.chkpt'
             if valid_loss <= min(valid_losses):
-                torch.save(checkpoint, os.path.join(opt.output_dir, model_name))
+                torch.save(checkpoint, os.path.join(get_output_dir(opt), model_name))
                 print('    - [Info] The checkpoint file has been updated.')
+        elif opt.save_mode == 'last':
+            model_name = 'model.chkpt'
+            torch.save(checkpoint, os.path.join(get_output_dir(opt), model_name))
+            print('    - [Info] The checkpoint file has been recorded.')
 
         with open(log_train_file, 'a') as log_tf, open(log_valid_file, 'a') as log_vf:
             log_tf.write(f'{epoch_i},{train_loss: 8.5f},{train_ppl: 8.5f},{100 * train_accu:3.3f}\n')
@@ -237,12 +252,14 @@ def main():
 
     parser.add_argument('-output_dir', type=str, default=None)
     parser.add_argument('-use_tb', action='store_true')
-    parser.add_argument('-save_mode', type=str, choices=['all', 'best'], default='best')
+    parser.add_argument('-save_mode', type=str, choices=['all', 'best', 'last'], default='last')
 
     parser.add_argument('-no_cuda', action='store_true')
     parser.add_argument('-label_smoothing', action='store_true')
 
     parser.add_argument('-use_ckpt', default=None)
+    parser.add_argument('-x', type=int, default=None)
+    parser.add_argument('-y', type=int, default=None)
 
     opt = parser.parse_args()
     if opt.use_ckpt is not None:
@@ -265,12 +282,12 @@ def main():
         np.random.seed(opt.seed)
         random.seed(opt.seed)
 
-    if not opt.output_dir:
+    if not get_output_dir(opt):
         print('No experiment result will be saved.')
         raise ValueError()
 
-    if not os.path.exists(opt.output_dir):
-        os.makedirs(opt.output_dir)
+    if not os.path.exists(get_output_dir(opt)):
+        os.makedirs(get_output_dir(opt))
 
     if opt.batch_size < 2048 and opt.n_warmup_steps <= 4000:
         print('[Warning] The warmup steps may be not enough.\n'
@@ -307,6 +324,8 @@ def main():
         n_head=opt.n_head,
         dropout=opt.dropout,
         scale_emb_or_prj=opt.scale_emb_or_prj).to(device)
+
+    transformer = prune(transformer, opt.x, opt.y)
 
     optimizer = ScheduledOptim(
         optim.Adam(transformer.parameters(), betas=(0.9, 0.98), eps=1e-09),
@@ -375,7 +394,61 @@ def prepare_dataloaders(opt, device):
     return train_iterator, val_iterator
 
 
+def get_dir_vector():
+    initia_w = torch.load('initial/model.pt')
+    pass1_w = torch.load('1passnoprune/model.chkpt')['model']
+    direction = OrderedDict()
+    for k in initia_w:
+        diff = initia_w[k] - pass1_w[k]
+        diff_sum = (diff ** 2).sum()
+        norm_diff = diff / (diff_sum + 1e-6)
+        direction[k] = norm_diff
+    print(direction)
+    torch.save(direction, 'vectors/opt_dir.pt')
+
+    for k in initia_w:
+        diff = torch.randn_like(initia_w[k])
+        diff_sum = (diff ** 2).sum()
+        norm_diff = diff / (diff_sum + 1e-6)
+        direction[k] = norm_diff
+    print(direction)
+    torch.save(direction, 'vectors/rand_dir.pt')
+    exit(0)
+
+
+def prune(model, x, y):
+    from torch.nn.utils import prune
+    import re
+    pass1_w = torch.load('1passnoprune/model.chkpt')['model']
+    model.load_state_dict(pass1_w)
+    all_params = []
+    for a in model.named_parameters():
+        if 'weight' not in a[0]:
+            continue
+        name = re.sub(r'\.(\d+)', r'[\1]', a[0])
+        name = name.rsplit('.weight', 1)[0]
+        all_params.append((eval(f'model.{name}'), 'weight'))
+    prune.global_unstructured(all_params, pruning_method=prune.L1Unstructured, amount=0.1)
+    with torch.no_grad():
+        state_dict = model.state_dict()
+        opt_vec = torch.load('vectors/opt_dir.pt')
+        rand_vec = torch.load('vectors/rand_dir.pt')
+        for a in state_dict:
+            if 'weight_orig' not in a:
+                continue
+            weight_str = a.replace('weight_orig', 'weight')
+            state_dict[a] = x * opt_vec[weight_str] + y * rand_vec[weight_str]
+        model.load_state_dict(state_dict)
+    return model
+
+
+def get_output_dir(opt):
+    return f'{opt.x},{opt.y}'
+
+
 if __name__ == '__main__':
     epoch = None
     model_dict = None
+
+    # get_dir_vector()
     main()
