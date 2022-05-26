@@ -258,8 +258,8 @@ def main():
     parser.add_argument('-label_smoothing', action='store_true')
 
     parser.add_argument('-use_ckpt', default=None)
-    parser.add_argument('-x', type=int, default=None)
-    parser.add_argument('-y', type=int, default=None)
+    parser.add_argument('-x', type=float, default=None)
+    parser.add_argument('-y', type=float, default=None)
 
     opt = parser.parse_args()
     if opt.use_ckpt is not None:
